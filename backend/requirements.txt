@@ -19,7 +19,5 @@ pandas>=2.2.0
 openpyxl>=3.1.2
 markdown>=3.6
 
-# Async utilities
-httpx>=0.27.0
-aiofiles>=23.2.1
-tenacity>=8.3.0
+# Neo4j driver (for CypherSolver direct graph queries)
+neo4j>=5.0

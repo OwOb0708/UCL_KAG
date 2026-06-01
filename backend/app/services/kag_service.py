@@ -11,25 +11,18 @@ from pathlib import Path
 class KAGService:
     """Async wrapper around the KAG builder and solver pipelines.
 
-    Builder pipeline (schema-constrained):
+    Builder  (schema-constrained KG construction):
         TXTReader → LengthSplitter → SchemaConstraintExtractor
         (UclLabNERPrompt + UclLabRelationPrompt) → BatchVectorizer → KGWriter
 
-    Solver pipeline (KAG graph reasoning):
-        think_pipeline → kag_static_pipeline
-          ├── lf_kag_static_planner  (task decomposition)
-          ├── kag_hybrid_executor    (KG logical-form query + reading comprehension)
-          │     flow: "kg_fr -> rc"
-          │     kg_fr: entity-linking + SPO logical-form → Neo4j graph traversal
-          │     rc  : vector-chunk context + LLM reading comprehension
-          ├── py_code_based_math_executor
-          ├── kag_deduce_executor
-          ├── kag_output_executor
-          └── llm_index_generator    (final answer in Traditional Chinese)
-
-    Critical: index_list must include "chunk_index" so the rc step has
-    vector chunks to ground its answers.  An empty index_list silently
-    disables ALL retrieval and is the primary cause of poor performance.
+    Solver  (Cypher-first, KAG fallback):
+        1. CypherSolver.solve()
+               LLM → Cypher query → Neo4j direct execution → LLM formats answer
+               ≈ 2 LLM calls, answers schema-typed 1/2/3-hop graph questions
+               in seconds instead of 30 minutes.
+        2. Fallback: KAG think_pipeline (vector chunk retrieval)
+               Activated when Cypher returns empty results or execution fails.
+               Handles open-ended / unstructured questions not suited for Cypher.
     """
 
     def __init__(
@@ -53,12 +46,11 @@ class KAGService:
         self._namespace = namespace
         self._schema_path = schema_path
 
-        # Neo4j – stored so _setup_project and solve() can reference them
         self._neo4j_uri = neo4j_uri or "bolt://neo4j:7687"
         self._neo4j_user = neo4j_user or "neo4j"
         self._neo4j_password = neo4j_password or "neo4j@openspg"
 
-        # Big model: reading comprehension + final answer (quality-critical)
+        # Big model: final answer generation (quality-critical)
         self._llm_kwargs = dict(
             base_url=openai_base_url,
             api_key=openai_api_key,
@@ -66,7 +58,7 @@ class KAGService:
             temperature=0.1,
             timeout=300,
         )
-        # Small model: planning / logical-form rewriting / deduction / output formatting
+        # Planner model: Cypher generation & reasoning steps (speed-critical)
         self._planner_llm_kwargs = dict(
             base_url=openai_base_url,
             api_key=openai_api_key,
@@ -109,15 +101,10 @@ class KAGService:
     def _sync_build(self, text: str, source: str) -> bool:
         """Schema-constrained KG builder.
 
-        Pipeline:
-            TXTReader → LengthSplitter
-            → SchemaConstraintExtractor (UclLabNERPrompt + UclLabRelationPrompt)
-            → BatchVectorizer → KGWriter
-
-        SchemaConstraintExtractor enforces that:
-        - NER output is filtered to the 12 UCLLab entity types
-        - Relation predicates are limited to the 19 defined in RELATION_SCHEMA
-        This prevents LLM-invented types from polluting the graph.
+        NER is restricted to 12 UCLLab entity types and 19 relation predicates
+        defined in ucl_lab_ner.py and ucl_lab_relation.py.  The
+        SchemaConstraintExtractor filters any LLM-invented types at parse time,
+        so the graph stays clean across repeated ingestions.
         """
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".txt", delete=False, encoding="utf-8"
@@ -162,46 +149,60 @@ class KAGService:
     # ── solver ───────────────────────────────────────────────────────────────
 
     async def solve(self, question: str) -> tuple[str, list[dict], list[str]]:
-        """KAG graph-reasoning solver.
+        """Cypher-first solver with KAG fallback.
 
-        Uses think_pipeline (kag_static_pipeline) which performs:
-          1. Task decomposition (planner)
-          2. KG graph traversal via SPO logical forms (kg_fr step of kag_hybrid_executor)
-          3. Vector-chunk retrieval for reading comprehension (rc step)
-          4. Math / deduction / output formatting executors
-          5. Final answer generation in Traditional Chinese
+        Step 1 — CypherSolver (fast path):
+            LLM generates a schema-aware Cypher query (1 planner-model call),
+            executes it directly on Neo4j, LLM formats the answer (1 chat-model
+            call).  This handles 1/2/3-hop schema-typed questions in ~5-30s.
 
-        Key fix vs naive RAG:
-          - index_list: ["chunk_index"] enables vector chunk retrieval for rc step.
-            Previously [] caused ALL retrieval to silently be skipped, making the
-            think_pipeline behave worse than a basic LLM call.
-          - kag_hybrid_executor flow "kg_fr->rc" traverses the schema-typed Neo4j
-            graph (UCLLab.Person, UCLLab.Project, etc.) before reading comprehension,
-            enabling true multi-hop KG reasoning.
+        Step 2 — KAG think_pipeline (fallback):
+            Activated when Cypher returns empty results or the query fails
+            (e.g. open-ended / unstructured questions).  Uses chunk_index for
+            vector retrieval + kag_hybrid_executor for KG reasoning.
         """
         if not self._initialized:
             await self.initialize()
+
+        # ── Step 1: Cypher-first ─────────────────────────────────────────────
+        try:
+            from app.services.cypher_solver import CypherSolver
+            cypher_solver = CypherSolver(
+                neo4j_uri=self._neo4j_uri,
+                neo4j_user=self._neo4j_user,
+                neo4j_password=self._neo4j_password,
+                llm_kwargs=self._llm_kwargs,
+                planner_kwargs=self._planner_llm_kwargs,
+            )
+            answer, facts = await cypher_solver.solve(question)
+            if answer:
+                print(f"[KAG] Cypher path answered: {len(answer)} chars")
+                return answer, facts, []
+            print("[KAG] Cypher returned empty, falling back to KAG pipeline")
+        except Exception as exc:
+            print(f"[KAG] Cypher solver error: {exc}, falling back")
+
+        # ── Step 2: KAG think_pipeline fallback ─────────────────────────────
+        return await self._kag_pipeline_solve(question)
+
+    async def _kag_pipeline_solve(self, question: str) -> tuple[str, list[dict], list[str]]:
+        """KAG think_pipeline — used as fallback for non-graph questions.
+
+        index_list: ["chunk_index"] enables vector-chunk retrievers for the
+        rc (reading comprehension) step inside kag_hybrid_executor.
+        Without this, rc has no grounding context (the original bug that
+        caused 30-minute waits with empty / wrong answers).
+        """
         try:
             from kag.solver.main_solver import SolverMain
             solver = SolverMain()
-            question = f"請務必使用繁體中文回答以下問題：{question}"
+            q = f"請務必使用繁體中文回答以下問題：{question}"
 
             task_key = f"0_{self._project_id}"
             llm_cfg = {"type": "openai", **self._llm_kwargs}
             planner_cfg = {"type": "openai", **self._planner_llm_kwargs}
             embed_cfg = {"type": "openai", **self._embed_kwargs}
 
-            # ── KG hybrid executor ─────────────────────────────────────────
-            # flow "kg_fr->rc":
-            #   kg_fr: converts query → SPO logical form → Neo4j graph traversal
-            #          finds schema-typed entities (Person, Project, Task …) and
-            #          their relations, returns relevant subgraph triples
-            #   rc   : combines KG triples + vector chunks → LLM reading comprehension
-            #
-            # lf_rewriter (kag_spo_lf): translates natural language into
-            #   Subject-Predicate-Object patterns that can be executed against
-            #   the typed Neo4j graph.  Uses the small/planner model to keep
-            #   latency low.
             _graph_executor = {
                 "type": "kag_hybrid_executor",
                 "flow": "kg_fr->rc",
@@ -215,7 +216,6 @@ class KAGService:
                 "kag_qa_task_config_key": task_key,
             }
 
-            # ── think_pipeline (kag_static_pipeline) ──────────────────────
             custom_pipeline = {
                 "type": "kag_static_pipeline",
                 "planner": {
@@ -253,4 +253,11 @@ class KAGService:
                             "namespace": self._namespace,
                             "language": "zh",
                         },
-                   
+                        "vectorizer": embed_cfg,
+                        "index_list": ["chunk_index"],
+                    }],
+                },
+            }
+            answer = await solver.ainvoke(
+                project_id=self._project_id,
+                tas
