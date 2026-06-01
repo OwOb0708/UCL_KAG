@@ -1,0 +1,206 @@
+namespace UCLLab
+
+# ============================================================
+# 人員
+# ============================================================
+Person(人員): EntityType
+  properties:
+    name(姓名): Text
+      constraint: NotNull
+    role(角色): Text
+      # 研究生 / 助教 / 老師 / 顧問
+    studentId(學號): Text
+
+# ============================================================
+# 專案 / 系統
+# 對應文件裡「三、專案事項」的每一個項目
+# 例：ToneTone高分、AI鍾老闆、波力梅智慧化升級、官網聊天機器人...
+# ============================================================
+Project(專案): EntityType
+  properties:
+    name(名稱): Text
+      constraint: NotNull
+    category(類別): Text
+      # 庶務 / 專案 / 比賽 / 計畫 / 個人研究
+    status(狀態): Text
+      # 進行中 / 已完成 / 暫緩 / 待議 / 結案
+    version(版號): Text
+    systemOnlineDate(系統上線日期): Text
+    lead(主要負責人): Person
+    consultant(顧問): Person
+    members(參與成員): Person
+
+# ============================================================
+# 待辦事項 / 子任務
+# 對應文件裡每個專案下的「事項 a、b、c...」
+# 這是讓圖不再是星狀的關鍵節點
+# ============================================================
+Task(待辦事項): EntityType
+  properties:
+    content(內容): Text
+      constraint: NotNull
+    status(狀態): Text
+      # 已完成 / 進行中 / 待處理 / 暫緩 / 待議
+    deadline(期程): Text
+    result(執行結果): Text
+    assignedTo(負責人): Person
+    coAssignedTo(協作人員): Person
+    belongsTo(所屬專案): Project
+    dependsOn(前置任務): Task
+    decidedIn(決議於): MeetingRecord
+
+# ============================================================
+# 會議記錄
+# 每次開會產生一份，讓歷史版本可以保留與比較
+# ============================================================
+MeetingRecord(會議記錄): EntityType
+  properties:
+    title(標題): Text
+    date(日期): Text
+      constraint: NotNull
+    semester(學期): Text
+      # 例：114-2
+    location(地點): Text
+    chair(主持人): Person
+    attendees(出席者): Person
+    absentees(請假者): Person
+    produces(產出事項): Task
+    updatesProject(涉及專案): Project
+
+# ============================================================
+# 會議決議
+# 對應文件裡「六、提案討論」的條列事項
+# 或各專案下需要決定的重要事項
+# ============================================================
+Decision(會議決議): EntityType
+  properties:
+    content(決議內容): Text
+      constraint: NotNull
+    decidedAt(決議日期): Text
+    executor(執行人): Person
+    deadline(執行期限): Text
+    status(執行狀態): Text
+      # 已執行 / 待執行 / 取消
+    madeIn(決議於): MeetingRecord
+    affects(影響專案): Project
+
+# ============================================================
+# 計畫 (研究計畫 / 教學計畫)
+# 對應文件裡「四、計畫事項」
+# 例：115教學實踐、6G二期、115數位共好、國科會跨領域...
+# ============================================================
+ResearchPlan(研究計畫): EntityType
+  properties:
+    name(名稱): Text
+      constraint: NotNull
+    planCode(計畫代號): Text
+    category(類別): Text
+      # 教學實踐 / 國科會 / 產學合作 / 政府補助
+    status(狀態): Text
+      # 申請中 / 審核中 / 執行中 / 結案 / 等開獎
+    startDate(開始日期): Text
+    endDate(結束日期): Text
+    budgetDeadline(經費動支期限): Text
+    lead(負責人): Person
+    relatedProject(相關專案): Project
+
+# ============================================================
+# 專利
+# 對應文件裡「一、庶務事項 (8)~(12) 校內專利補助」
+# ============================================================
+Patent(專利): EntityType
+  properties:
+    name(專利名稱): Text
+      constraint: NotNull
+    patentOffice(事務所): Text
+      # 聖島國際 / 廣運國際 / ...
+    status(狀態): Text
+      # 申請中 / 送審中 / 已過補助申請 / 有問題待討論 / 已完成
+    region(申請地區): Text
+      # 中華民國 / 美國 / ...
+    subsidyType(補助類型): Text
+      # 全額補助 / 部分補助
+    lead(負責人): Person
+    relatedPlan(相關計畫): ResearchPlan
+
+# ============================================================
+# 計算資源
+# 對應文件裡的 DGX、H200、Azure、T4 等
+# ============================================================
+ComputeResource(計算資源): EntityType
+  properties:
+    name(名稱): Text
+      constraint: NotNull
+    resourceType(資源類型): Text
+      # GPU伺服器 / 雲端 / 虛擬機 / 設備
+    spec(規格): Text
+    location(位置): Text
+    status(狀態): Text
+      # 正常 / 維修中 / 待處理
+    admin(管理員): Person
+    usedBy(使用專案): Project
+
+# ============================================================
+# 設備 / 硬體
+# 對應文件裡機房設備、公務車、SIM卡、RFID等
+# ============================================================
+Equipment(設備): EntityType
+  properties:
+    name(名稱): Text
+      constraint: NotNull
+    equipmentType(設備類型): Text
+      # 網路設備 / 車輛 / 電話 / 伺服器 / 其他
+    location(位置): Text
+    status(狀態): Text
+      # 正常 / 報修中 / 待處理 / 已處理
+    lastMaintenance(上次保養日期): Text
+    nextMaintenance(下次保養日期): Text
+    staticIP(靜態IP): Text
+    manager(負責人): Person
+
+# ============================================================
+# 課程 (助教相關)
+# 對應文件裡「一、庶務事項 (1) 114-2 助教」
+# ============================================================
+Course(課程): EntityType
+  properties:
+    name(課程名稱): Text
+      constraint: NotNull
+    courseCode(課程代號): Text
+    semester(學期): Text
+    instructor(授課教師): Person
+    ta(助教): Person
+    consultant(顧問): Person
+    relatedProject(相關專案): Project
+
+# ============================================================
+# 外部廠商 / 合作單位
+# 對應文件裡波力梅、威剛、中鋼、聖島事務所等
+# ============================================================
+ExternalParty(外部單位): EntityType
+  properties:
+    name(名稱): Text
+      constraint: NotNull
+    partyType(類型): Text
+      # 廠商 / 合作學校 / 政府機關 / 事務所 / 業師
+    contactPerson(聯絡人): Text
+    relatedProject(相關專案): Project
+
+# ============================================================
+# 比賽
+# 對應文件裡「二、比賽事項」
+# ============================================================
+Competition(比賽): EntityType
+  properties:
+    name(比賽名稱): Text
+      constraint: NotNull
+    organizer(主辦單位): Text
+    stage(目前階段): Text
+      # 報名中 / 初賽 / 決賽 / 已結束
+    submissionDeadline(繳件截止): Text
+    presentationDate(發表日期): Text
+    location(地點): Text
+    prize(獎金說明): Text
+    lead(負責人): Person
+    teamMembers(參賽成員): Person
+    relatedProject(相關專案): Project

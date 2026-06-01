@@ -1,0 +1,140 @@
+services:
+  mysql:
+    restart: always
+    image: spg-registry.us-west-1.cr.aliyuncs.com/spg/openspg-mysql:latest
+    container_name: release-openspg-mysql
+    environment:
+      TZ: Asia/Shanghai
+      LANG: C.UTF-8
+      MYSQL_ROOT_PASSWORD: openspg
+      MYSQL_DATABASE: openspg
+    ports:
+      - "3306:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_general_ci
+    volumes:
+      - ./mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-popenspg"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+    networks:
+      - kag-net
+
+  neo4j:
+    restart: always
+    image: spg-registry.us-west-1.cr.aliyuncs.com/spg/openspg-neo4j:latest
+    container_name: release-openspg-neo4j
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - TZ=Asia/Shanghai
+      - NEO4J_AUTH=neo4j/neo4j@openspg
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_server_memory_heap_initial__size=1G
+      - NEO4J_server_memory_heap_max__size=4G
+      - NEO4J_server_memory_pagecache_size=1G
+      - NEO4J_apoc_export_file_enabled=true
+      - NEO4J_apoc_import_file_enabled=true
+      - NEO4J_dbms_security_procedures_unrestricted=*
+      - NEO4J_dbms_security_procedures_allowlist=*
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks:
+      - kag-net
+
+  minio:
+    restart: always
+    image: spg-registry.us-west-1.cr.aliyuncs.com/spg/openspg-minio:latest
+    container_name: release-openspg-minio
+    command: server --console-address ":9001" /data
+    environment:
+      MINIO_ACCESS_KEY: minio
+      MINIO_SECRET_KEY: minio@openspg
+      TZ: Asia/Shanghai
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ./minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - kag-net
+
+  openspg:
+    restart: always
+    image: spg-registry.us-west-1.cr.aliyuncs.com/spg/openspg-server:latest
+    container_name: release-openspg-server
+    ports:
+      - "8887:8887"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+      LANG: C.UTF-8
+    command: [
+      "java",
+      "-Dfile.encoding=UTF-8",
+      "-Xms2048m",
+      "-Xmx4096m",
+      "-jar",
+      "arks-sofaboot-0.0.1-SNAPSHOT-executable.jar",
+      "--server.repository.impl.jdbc.host=mysql",
+      "--server.repository.impl.jdbc.password=openspg",
+      "--builder.model.execute.num=20",
+      "--cloudext.graphstore.url=neo4j://release-openspg-neo4j:7687?user=neo4j&password=neo4j@openspg&database=neo4j",
+      "--cloudext.searchengine.url=neo4j://release-openspg-neo4j:7687?user=neo4j&password=neo4j@openspg&database=neo4j"
+    ]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8887/actuator/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 120s
+    networks:
+      - kag-net
+
+  app:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: ucl-kag-app
+    env_file:
+      - .env
+    environment:
+      - KAG_CONFIG_PATH=/app/kag_config.yaml
+      - OPENSPG_HOST=http://release-openspg-server:8887
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./frontend:/app/frontend:ro
+      - ./secrets:/app/secrets:ro
+      - ./data:/app/data:ro
+      - ./schema:/app/schema:ro
+      - ./kag_config.yaml:/app/kag_config.yaml.template:ro
+      - ./ckpt:/app/ckpt
+    depends_on:
+      openspg:
+        condition: service_healthy
+    networks:
+      - kag-net
+
+networks:
+  kag-net:
+    driver: bridge

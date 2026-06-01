@@ -1,0 +1,25 @@
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+pydantic-settings>=2.2.0
+python-multipart>=0.0.9
+
+# Official KAG SDK (OpenSPG/KAG) — latest stable is 0.8.0
+openspg-kag>=0.8.0
+
+# Google Drive
+google-auth>=2.29.0
+google-auth-oauthlib>=1.2.0
+google-api-python-client>=2.126.0
+
+# Document parsing
+pypdf>=4.2.0
+python-docx>=1.1.2
+python-pptx>=0.6.23
+pandas>=2.2.0
+openpyxl>=3.1.2
+markdown>=3.6
+
+# Async utilities
+httpx>=0.27.0
+aiofiles>=23.2.1
+tenacity>=8.3.0

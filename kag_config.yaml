@@ -1,0 +1,67 @@
+# KAG Configuration Reference
+# This file documents the KAG project settings.
+# The actual runtime config is built programmatically from .env by kag_service.py.
+#
+# Official docs: https://github.com/openspg/kag
+
+project:
+  id: 1
+  host_addr: http://release-openspg-server:8887
+  namespace: UCLLab
+  language: zh
+
+# NER + relation extraction LLM (OpenAI-compatible via Capystar)
+openie_llm: &default_llm
+  client_type: openai
+  base_url: ${OPENAI_BASE_URL}
+  api_key: ${OPENAI_API_KEY}
+  model: ${OPENAI_CHAT_MODEL}
+  temperature: 0.1
+  max_tokens: 4096
+
+# Chat / reasoning LLM (same endpoint)
+chat_llm: *default_llm
+
+# Embedding model
+vectorize_model:
+  client_type: openai
+  base_url: ${OPENAI_BASE_URL}
+  api_key: ${OPENAI_API_KEY}
+  model: ${OPENAI_EMBEDDING_MODEL}
+  vector_dimensions: 4096
+
+# Builder pipeline
+kag_builder:
+  chain:
+    type: unstructured
+    extractor:
+      type: schema_free_extractor
+    chunk_size: 1200
+    chunk_overlap: 180
+  writer:
+    type: kg_writer
+    graph_store:
+      type: neo4j
+      uri: ${NEO4J_URI}
+      user: ${NEO4J_USER}
+      password: ${NEO4J_PASSWORD}
+  vectorizer:
+    type: batch_vectorizer
+
+# Solver pipeline
+kag_solver:
+  lf_planner:
+    type: lf_planner
+  executor:
+    type: lf_executor
+    graph_store:
+      type: neo4j
+      uri: ${NEO4J_URI}
+      user: ${NEO4J_USER}
+      password: ${NEO4J_PASSWORD}
+  generator:
+    type: base_generator
+  reflector:
+    type: base_reflector
+
+log_level: INFO

@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>UCL Lab Resource Assistant</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;700&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="static/styles.css"/>
+</head>
+<body>
+
+  <!-- Fixed WebGL canvas -->
+  <canvas id="c"></canvas>
+
+  <!-- Scroll space -->
+  <div id="scroll-space"></div>
+
+  <!-- Panel 0 — Hero (visible by default) -->
+  <div class="panel" id="p0" style="opacity:1">
+    <div class="p-num">00</div>
+    <h1 class="p-h1">實驗室<br/>資源助理</h1>
+    <p class="p-sub">UCL · KAG · AI 查詢系統</p>
+  </div>
+
+  <!-- Panel 1 -->
+  <div class="panel" id="p1">
+    <div class="p-tag">01 / QUERY INPUT</div>
+    <h2 class="p-h2">提出<br/><em>問題</em></h2>
+  </div>
+
+  <!-- Panel 2 -->
+  <div class="panel" id="p2">
+    <div class="p-tag">02 / VECTOR SEARCH</div>
+    <h2 class="p-h2 p-h2--right">向量<br/><em>搜尋</em></h2>
+    <p class="p-stat">Neo4j · 向量語義搜尋<br/>混合圖譜知識檢索</p>
+  </div>
+
+  <!-- Panel 3 -->
+  <div class="panel" id="p3">
+    <div class="p-tag">03 / KNOWLEDGE GRAPH</div>
+    <h2 class="p-h2">圖譜<br/><em>推理</em></h2>
+  </div>
+
+  <!-- Panel 4 — Chat only, no title -->
+  <div class="panel panel--chat" id="p4">
+    <div class="chat-wrap" id="chatWrap">
+      <div class="chat-topbar">
+        <div class="ct-l">
+          <div class="ct-dot"></div>
+          <span class="ct-title">UCL 實驗室資源助理</span>
+        </div>
+        <span class="ct-status" id="statusBox">系統就緒。</span>
+      </div>
+      <div class="chat-log" id="chatLog"></div>
+      <form id="chatForm" class="chat-form">
+        <textarea id="messageInput" placeholder="輸入問題，例如：設備借用流程是什麼？&#10;Ctrl + Enter 送出" required></textarea>
+        <div class="cf-footer">
+          <span class="cf-hint">Ctrl + Enter 送出</span>
+          <button type="submit">送出 →</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Progress bar -->
+  <div id="progress-bar"></div>
+  <!-- Section label -->
+  <div id="section-label"></div>
+
+  <script src="static/threejs-bg.js?v=2" defer></script>
+  <script src="static/app.js?v=108" defer></script>
+</body>
+</html>
