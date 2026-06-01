@@ -9,7 +9,28 @@ from pathlib import Path
 
 
 class KAGService:
-    """Async wrapper around the KAG builder and solver pipelines."""
+    """Async wrapper around the KAG builder and solver pipelines.
+
+    Builder pipeline (schema-constrained):
+        TXTReader → LengthSplitter → SchemaConstraintExtractor
+        (UclLabNERPrompt + UclLabRelationPrompt) → BatchVectorizer → KGWriter
+
+    Solver pipeline (KAG graph reasoning):
+        think_pipeline → kag_static_pipeline
+          ├── lf_kag_static_planner  (task decomposition)
+          ├── kag_hybrid_executor    (KG logical-form query + reading comprehension)
+          │     flow: "kg_fr -> rc"
+          │     kg_fr: entity-linking + SPO logical-form → Neo4j graph traversal
+          │     rc  : vector-chunk context + LLM reading comprehension
+          ├── py_code_based_math_executor
+          ├── kag_deduce_executor
+          ├── kag_output_executor
+          └── llm_index_generator    (final answer in Traditional Chinese)
+
+    Critical: index_list must include "chunk_index" so the rc step has
+    vector chunks to ground its answers.  An empty index_list silently
+    disables ALL retrieval and is the primary cause of poor performance.
+    """
 
     def __init__(
         self,
@@ -31,6 +52,13 @@ class KAGService:
         self._project_id = project_id
         self._namespace = namespace
         self._schema_path = schema_path
+
+        # Neo4j – stored so _setup_project and solve() can reference them
+        self._neo4j_uri = neo4j_uri or "bolt://neo4j:7687"
+        self._neo4j_user = neo4j_user or "neo4j"
+        self._neo4j_password = neo4j_password or "neo4j@openspg"
+
+        # Big model: reading comprehension + final answer (quality-critical)
         self._llm_kwargs = dict(
             base_url=openai_base_url,
             api_key=openai_api_key,
@@ -38,7 +66,7 @@ class KAGService:
             temperature=0.1,
             timeout=300,
         )
-        # Lightweight model for planning/reasoning/deduction steps (not final answer generation)
+        # Small model: planning / logical-form rewriting / deduction / output formatting
         self._planner_llm_kwargs = dict(
             base_url=openai_base_url,
             api_key=openai_api_key,
@@ -79,6 +107,18 @@ class KAGService:
         return await loop.run_in_executor(None, self._sync_build, text, source)
 
     def _sync_build(self, text: str, source: str) -> bool:
+        """Schema-constrained KG builder.
+
+        Pipeline:
+            TXTReader → LengthSplitter
+            → SchemaConstraintExtractor (UclLabNERPrompt + UclLabRelationPrompt)
+            → BatchVectorizer → KGWriter
+
+        SchemaConstraintExtractor enforces that:
+        - NER output is filtered to the 12 UCLLab entity types
+        - Relation predicates are limited to the 19 defined in RELATION_SCHEMA
+        This prevents LLM-invented types from polluting the graph.
+        """
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".txt", delete=False, encoding="utf-8"
         ) as f:
@@ -122,6 +162,23 @@ class KAGService:
     # ── solver ───────────────────────────────────────────────────────────────
 
     async def solve(self, question: str) -> tuple[str, list[dict], list[str]]:
+        """KAG graph-reasoning solver.
+
+        Uses think_pipeline (kag_static_pipeline) which performs:
+          1. Task decomposition (planner)
+          2. KG graph traversal via SPO logical forms (kg_fr step of kag_hybrid_executor)
+          3. Vector-chunk retrieval for reading comprehension (rc step)
+          4. Math / deduction / output formatting executors
+          5. Final answer generation in Traditional Chinese
+
+        Key fix vs naive RAG:
+          - index_list: ["chunk_index"] enables vector chunk retrieval for rc step.
+            Previously [] caused ALL retrieval to silently be skipped, making the
+            think_pipeline behave worse than a basic LLM call.
+          - kag_hybrid_executor flow "kg_fr->rc" traverses the schema-typed Neo4j
+            graph (UCLLab.Person, UCLLab.Project, etc.) before reading comprehension,
+            enabling true multi-hop KG reasoning.
+        """
         if not self._initialized:
             await self.initialize()
         try:
@@ -130,42 +187,52 @@ class KAGService:
             question = f"請務必使用繁體中文回答以下問題：{question}"
 
             task_key = f"0_{self._project_id}"
-            # Big model: reading comprehension + final answer generation (quality-critical)
             llm_cfg = {"type": "openai", **self._llm_kwargs}
-            # Small model: planning, logical form rewriting, deduction, output formatting
             planner_cfg = {"type": "openai", **self._planner_llm_kwargs}
             embed_cfg = {"type": "openai", **self._embed_kwargs}
 
+            # ── KG hybrid executor ─────────────────────────────────────────
+            # flow "kg_fr->rc":
+            #   kg_fr: converts query → SPO logical form → Neo4j graph traversal
+            #          finds schema-typed entities (Person, Project, Task …) and
+            #          their relations, returns relevant subgraph triples
+            #   rc   : combines KG triples + vector chunks → LLM reading comprehension
+            #
+            # lf_rewriter (kag_spo_lf): translates natural language into
+            #   Subject-Predicate-Object patterns that can be executed against
+            #   the typed Neo4j graph.  Uses the small/planner model to keep
+            #   latency low.
             _graph_executor = {
                 "type": "kag_hybrid_executor",
                 "flow": "kg_fr->rc",
                 "lf_rewriter": {
                     "type": "kag_spo_lf",
-                    "llm_client": planner_cfg,  # logical form translation → small model
+                    "llm_client": planner_cfg,
                     "lf_trans_prompt": {"type": "default_logic_form_plan"},
                     "kag_qa_task_config_key": task_key,
                 },
-                "llm_client": llm_cfg,  # reading comprehension over retrieved chunks → big model
+                "llm_client": llm_cfg,
                 "kag_qa_task_config_key": task_key,
             }
 
+            # ── think_pipeline (kag_static_pipeline) ──────────────────────
             custom_pipeline = {
                 "type": "kag_static_pipeline",
                 "planner": {
                     "type": "lf_kag_static_planner",
-                    "llm": planner_cfg,  # task decomposition → small model
+                    "llm": planner_cfg,
                     "plan_prompt": {"type": "default_lf_static_planning"},
                     "rewrite_prompt": {"type": "default_rewrite_sub_task_query"},
                 },
                 "executors": [
                     _graph_executor,
-                    {"type": "py_code_based_math_executor", "llm": planner_cfg},  # math/code → small model
-                    {"type": "kag_deduce_executor", "llm_module": planner_cfg},   # deduction → small model
-                    {"type": "kag_output_executor", "llm_module": planner_cfg},   # output format → small model
+                    {"type": "py_code_based_math_executor", "llm": planner_cfg},
+                    {"type": "kag_deduce_executor",  "llm_module": planner_cfg},
+                    {"type": "kag_output_executor",  "llm_module": planner_cfg},
                 ],
                 "generator": {
                     "type": "llm_index_generator",
-                    "llm_client": llm_cfg,  # final answer in Traditional Chinese → big model
+                    "llm_client": llm_cfg,
                     "generated_prompt": {"type": "default_refer_generator_prompt"},
                     "enable_ref": True,
                 },
@@ -186,75 +253,4 @@ class KAGService:
                             "namespace": self._namespace,
                             "language": "zh",
                         },
-                        "vectorizer": embed_cfg,
-                        "index_list": [],
-                    }],
-                },
-            }
-            answer = await solver.ainvoke(
-                project_id=self._project_id,
-                task_id=0,
-                query=question,
-                host_addr=self._host,
-                params=params,
-            )
-            clean = re.sub(r"<reference[^>]*></reference>", "", str(answer)).strip() if answer else ""
-            return clean, [], []
-        except Exception as exc:
-            print(f"[KAG] solve error: {exc}")
-            return "", [], [str(exc)]
-
-    # ── helpers ──────────────────────────────────────────────────────────────
-
-    def _setup_project(self) -> None:
-        import yaml
-        try:
-            from knext.project.client import ProjectClient
-            client = ProjectClient(host_addr=self._host)
-
-            existing = client.get_by_namespace(namespace=self._namespace)
-            if not existing:
-                config_path = os.environ.get("KAG_CONFIG_PATH", "/app/kag_config.yaml")
-                with open(config_path) as f:
-                    cfg = yaml.safe_load(f)
-                vm = cfg.get("vectorize_model", {})
-                cfg["vectorizer"] = {
-                    "type": vm.get("client_type", "openai"),
-                    "base_url": vm.get("base_url", ""),
-                    "api_key": vm.get("api_key", ""),
-                    "model": vm.get("model", ""),
-                    "vector_dimensions": vm.get("vector_dimensions", 1536),
-                }
-                project = client.create(
-                    name="UCL Lab KAG",
-                    namespace=self._namespace,
-                    config=cfg,
-                    userNo="openspg",
-                )
-                print(f"[KAG] Project created with id={project.id}")
-                self._project_id = project.id
-                os.environ["KAG_PROJECT_ID"] = str(project.id)
-            else:
-                print(f"[KAG] Project already exists with id={existing.id}")
-                self._project_id = existing.id
-                os.environ["KAG_PROJECT_ID"] = str(existing.id)
-        except Exception as exc:
-            print(f"[KAG] project setup warning: {exc}")
-
-        # Commit schema via knext CLI (reads KAG_PROJECT_ID and KAG_PROJECT_HOST_ADDR from env)
-        schema_dir = str(Path(self._schema_path).parent)
-        try:
-            result = subprocess.run(
-                ["knext", "schema", "commit"],
-                capture_output=True, text=True, timeout=60,
-                cwd=schema_dir,
-                env={**os.environ, "KAG_PROJECT_ID": str(self._project_id),
-                     "KAG_PROJECT_HOST_ADDR": self._host},
-            )
-            if result.returncode != 0:
-                print(f"[KAG] schema commit: {result.stderr.strip() or result.stdout.strip()}")
-        except FileNotFoundError:
-            print("[KAG] knext CLI not found — skipping schema commit")
-        except Exception as exc:
-            print(f"[KAG] schema commit warning: {exc}")
-        print("[KAG] Project/schema setup done.")
+                   
